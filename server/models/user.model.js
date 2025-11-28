@@ -2,11 +2,11 @@ import mongoose, { Mongoose } from "mongoose";
 import bcrypt from "bcrypt"
 
 let EmailSchema = mongoose.Schema({
-    email: {
+    userEmail: {
         type: String,
         required: true
     },
-    verifed: {
+    verified: {
         type: Boolean,
         default: false
     }
