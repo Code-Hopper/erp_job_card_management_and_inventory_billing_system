@@ -11,3 +11,21 @@ export const UserRouterTest = (req, res) => {
 // add technician
 // app setting 
 // create customer
+
+// auth middleware for admin
+
+// new route to register technician
+// role: technician
+
+// create technician login
+
+    // email/userid + password
+    // jwt
+
+// auth middleware for technician
+
+    // token verified
+    // req.user
+    // technician _id
+
+    // customer create(created by)/job card (created by)/update job card(updated by)
