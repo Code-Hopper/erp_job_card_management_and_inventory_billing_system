@@ -207,6 +207,43 @@ CREATE TABLE payments (
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE company (
+  id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+
+  -- Basic Info
+  name VARCHAR NOT NULL,
+  phone VARCHAR,
+  email VARCHAR,
+  website VARCHAR,
+
+  -- Address
+  address_line1 VARCHAR,
+  address_line2 VARCHAR,
+  city VARCHAR,
+  state VARCHAR,
+  pincode VARCHAR,
+  country VARCHAR DEFAULT 'India',
+
+  -- Tax Info
+  gstn VARCHAR,
+  pan VARCHAR,
+
+  -- Branding
+  logo_url VARCHAR,
+
+  -- Bank Details
+  bank_name VARCHAR,
+  bank_account_no VARCHAR,
+  bank_ifsc VARCHAR,
+  upi_id VARCHAR,
+
+  -- Extra
+  notes TEXT,
+
+  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
 -- ================= FOREIGN KEYS =================
 
 ALTER TABLE users ADD FOREIGN KEY (role_id) REFERENCES roles(id);
