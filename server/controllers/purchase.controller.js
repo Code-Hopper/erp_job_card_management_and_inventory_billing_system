@@ -15,8 +15,8 @@ const validateItems = (items) => {
 
   for (const [index, item] of items.entries()) {
     const position = index + 1;
-    if (!item || !item.productId) {
-      return { ok: false, message: `Item ${position} is missing productId.` };
+    if (!item || !item.sku) {
+      return { ok: false, message: `Item ${position} is missing sku.` };
     }
     const quantity = normalizeNumber(item.quantity, NaN);
     const price = normalizeNumber(item.price, NaN);
@@ -29,6 +29,67 @@ const validateItems = (items) => {
   }
 
   return { ok: true };
+};
+
+const requireNewProductFields = (item, position) => {
+  const missing = [];
+  if (!item.name) missing.push("name");
+  if (item.purchasePrice === undefined) missing.push("purchasePrice");
+  if (item.sellPrice === undefined) missing.push("sellPrice");
+  if (item.gstRate === undefined) missing.push("gstRate");
+
+  if (missing.length > 0) {
+    return {
+      ok: false,
+      message: `Item ${position} requires ${missing.join(", ")} to create a new product.`,
+    };
+  }
+
+  return { ok: true };
+};
+
+const resolveProductBySku = async (client, item, position, fallbackSupplierId, addedBy) => {
+  const sku = String(item.sku).trim();
+  const productResult = await client.query(
+    `SELECT id, sku, purchase_price, sell_price, gst_rate
+     FROM products
+     WHERE sku = $1
+     LIMIT 1`,
+    [sku]
+  );
+
+  if (productResult.rowCount > 0) {
+    return { product: productResult.rows[0], created: false };
+  }
+
+  const requiredCheck = requireNewProductFields(item, position);
+  if (!requiredCheck.ok) {
+    return { error: requiredCheck.message };
+  }
+
+  const supplierId = item.supplierId ?? fallbackSupplierId ?? null;
+
+  const insertResult = await client.query(
+    `INSERT INTO products
+      (name, sku, purchase_price, sell_price, gst_rate, hsn, notes, category_id, supplier_id, added_by)
+     VALUES
+      ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+     RETURNING id, sku, purchase_price, sell_price, gst_rate`,
+    [
+      item.name,
+      sku,
+      normalizeNumber(item.purchasePrice, 0),
+      normalizeNumber(item.sellPrice, 0),
+      normalizeNumber(item.gstRate, 0),
+      item.hsn ?? null,
+      item.notes ?? null,
+      item.categoryId ?? null,
+      supplierId,
+      addedBy,
+    ]
+  );
+
+  return { product: insertResult.rows[0], created: true };
 };
 
 const createPurchase = async (req, res) => {
@@ -49,23 +110,6 @@ const createPurchase = async (req, res) => {
     return res.status(400).json({ message: itemsValidation.message });
   }
 
-  const purchaseItems = items.map((item) => ({
-    productId: item.productId,
-    quantity: normalizeNumber(item.quantity, 0),
-    price: normalizeNumber(item.price, 0),
-    gst: normalizeNumber(item.gst, 0),
-  }));
-
-  const computedGst = purchaseItems.reduce((sum, item) => sum + item.gst, 0);
-  const computedTotal = purchaseItems.reduce(
-    (sum, item) => sum + item.price * item.quantity + item.gst,
-    0
-  );
-
-  const finalGst = gstAmount === null ? computedGst : normalizeNumber(gstAmount, 0);
-  const finalTotal =
-    totalAmount === null ? computedTotal : normalizeNumber(totalAmount, 0);
-
   const addedBy = req.user?.sub ?? null;
 
   const client = await pool.connect();
@@ -83,16 +127,53 @@ const createPurchase = async (req, res) => {
       return res.status(400).json({ message: "Supplier not found." });
     }
 
-    const productIds = purchaseItems.map((item) => item.productId);
-    const productResult = await client.query(
-      `SELECT id FROM products WHERE id = ANY($1::int[])`,
-      [productIds]
-    );
+    const purchaseItems = [];
+    let computedGst = 0;
+    let computedTotal = 0;
 
-    if (productResult.rowCount !== productIds.length) {
-      await client.query("ROLLBACK");
-      return res.status(400).json({ message: "One or more products not found." });
+    for (const [index, item] of items.entries()) {
+      const position = index + 1;
+      const resolved = await resolveProductBySku(
+        client,
+        item,
+        position,
+        supplierId,
+        addedBy
+      );
+
+      if (resolved?.error) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: resolved.error });
+      }
+
+      const product = resolved.product;
+      const quantity = normalizeNumber(item.quantity, 0);
+      const price = normalizeNumber(item.price, 0);
+      const gstRate =
+        item.gstRate !== undefined
+          ? normalizeNumber(item.gstRate, 0)
+          : normalizeNumber(product.gst_rate, 0);
+      const gst =
+        item.gst !== undefined
+          ? normalizeNumber(item.gst, 0)
+          : (price * quantity * gstRate) / 100;
+
+      computedGst += gst;
+      computedTotal += price * quantity + gst;
+
+      purchaseItems.push({
+        productId: product.id,
+        sku: product.sku,
+        quantity,
+        price,
+        gst,
+      });
     }
+
+    const finalGst =
+      gstAmount === null ? computedGst : normalizeNumber(gstAmount, 0);
+    const finalTotal =
+      totalAmount === null ? computedTotal : normalizeNumber(totalAmount, 0);
 
     const purchaseResult = await client.query(
       `INSERT INTO purchases (supplier_id, total_amount, gst_amount, status, created_at, added_by)
@@ -151,6 +232,7 @@ const createPurchase = async (req, res) => {
     });
   } catch (error) {
     await client.query("ROLLBACK");
+    console.log(error)
     return res.status(500).json({ message: "Failed to create purchase." });
   } finally {
     client.release();
@@ -204,10 +286,18 @@ const getPurchaseById = async (req, res) => {
     }
 
     const itemsResult = await pool.query(
-      `SELECT id, purchase_id, product_id, quantity, price, gst
-       FROM purchase_items
-       WHERE purchase_id = $1
-       ORDER BY id`,
+      `SELECT pi.id,
+              pi.purchase_id,
+              pi.product_id,
+              pi.quantity,
+              pi.price,
+              pi.gst,
+              p.sku,
+              p.name
+       FROM purchase_items pi
+       LEFT JOIN products p ON p.id = pi.product_id
+       WHERE pi.purchase_id = $1
+       ORDER BY pi.id`,
       [id]
     );
 
@@ -216,6 +306,7 @@ const getPurchaseById = async (req, res) => {
       items: itemsResult.rows,
     });
   } catch (error) {
+    console.log(error)
     return res.status(500).json({ message: "Failed to fetch purchase." });
   }
 };
@@ -316,22 +407,47 @@ const updatePurchase = async (req, res) => {
         [id]
       );
 
-      const normalizedItems = items.map((item) => ({
-        productId: item.productId,
-        quantity: normalizeNumber(item.quantity, 0),
-        price: normalizeNumber(item.price, 0),
-        gst: normalizeNumber(item.gst, 0),
-      }));
+      const normalizedItems = [];
+      let computedGst = 0;
+      let computedTotal = 0;
 
-      const productIds = normalizedItems.map((item) => item.productId);
-      const productResult = await client.query(
-        `SELECT id FROM products WHERE id = ANY($1::int[])`,
-        [productIds]
-      );
+      for (const [index, item] of items.entries()) {
+        const position = index + 1;
+        const resolved = await resolveProductBySku(
+          client,
+          item,
+          position,
+          supplierId,
+          req.user?.sub ?? null
+        );
 
-      if (productResult.rowCount !== productIds.length) {
-        await client.query("ROLLBACK");
-        return res.status(400).json({ message: "One or more products not found." });
+        if (resolved?.error) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: resolved.error });
+        }
+
+        const product = resolved.product;
+        const quantity = normalizeNumber(item.quantity, 0);
+        const price = normalizeNumber(item.price, 0);
+        const gstRate =
+          item.gstRate !== undefined
+            ? normalizeNumber(item.gstRate, 0)
+            : normalizeNumber(product.gst_rate, 0);
+        const gst =
+          item.gst !== undefined
+            ? normalizeNumber(item.gst, 0)
+            : (price * quantity * gstRate) / 100;
+
+        computedGst += gst;
+        computedTotal += price * quantity + gst;
+
+        normalizedItems.push({
+          productId: product.id,
+          sku: product.sku,
+          quantity,
+          price,
+          gst,
+        });
       }
 
       for (const item of normalizedItems) {
@@ -372,12 +488,6 @@ const updatePurchase = async (req, res) => {
           [item.productId, "IN", item.quantity, "purchase", id, new Date()]
         );
       }
-
-      const computedGst = normalizedItems.reduce((sum, item) => sum + item.gst, 0);
-      const computedTotal = normalizedItems.reduce(
-        (sum, item) => sum + item.price * item.quantity + item.gst,
-        0
-      );
 
       updateEntries.push([
         "gst_amount",
