@@ -209,4 +209,248 @@ const createTechnician = async (req, res) => {
   }
 };
 
-export { loginUser, getMe, createTechnician };
+const listUsers = async (req, res) => {
+  try {
+    const result = await query(
+      `SELECT u.id,
+              u.name,
+              u.email,
+              u.role_id,
+              u.profile_picture_id,
+              u.address,
+              u.notes,
+              r.title AS role_title
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       ORDER BY u.id DESC`
+    );
+
+    return res.json({ users: result.rows });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch users." });
+  }
+};
+
+const getUserById = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await query(
+      `SELECT u.id,
+              u.name,
+              u.email,
+              u.role_id,
+              u.profile_picture_id,
+              u.address,
+              u.notes,
+              r.title AS role_title
+       FROM users u
+       LEFT JOIN roles r ON r.id = u.role_id
+       WHERE u.id = $1
+       LIMIT 1`,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    return res.json({ user: result.rows[0] });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to fetch user." });
+  }
+};
+
+const createUser = async (req, res) => {
+  const {
+    name,
+    email,
+    password,
+    roleId,
+    address = null,
+    notes = null,
+    profilePictureId = null,
+  } = req.body || {};
+
+  if (!name || !email || !password || !roleId) {
+    return res
+      .status(400)
+      .json({ message: "Name, email, password, and roleId are required." });
+  }
+
+  try {
+    const roleResult = await query(
+      `SELECT id, title
+       FROM roles
+       WHERE id = $1
+       LIMIT 1`,
+      [roleId]
+    );
+
+    if (roleResult.rowCount === 0) {
+      return res.status(400).json({ message: "Role not found." });
+    }
+
+    const existingUser = await query(
+      `SELECT id
+       FROM users
+       WHERE email = $1
+       LIMIT 1`,
+      [email]
+    );
+
+    if (existingUser.rowCount > 0) {
+      return res.status(409).json({ message: "Email already exists." });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const insertResult = await query(
+      `INSERT INTO users (name, email, role_id, password, profile_picture_id, address, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name, email, role_id, profile_picture_id, address, notes`,
+      [name, email, roleId, hashedPassword, profilePictureId, address, notes]
+    );
+
+    const user = insertResult.rows[0];
+
+    return res.status(201).json({
+      user: {
+        ...user,
+        role_title: roleResult.rows[0].title,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to create user." });
+  }
+};
+
+const updateUser = async (req, res) => {
+  const { id } = req.params;
+  const {
+    name,
+    email,
+    password,
+    roleId,
+    address,
+    notes,
+    profilePictureId,
+  } = req.body || {};
+
+  const fields = {
+    name,
+    email,
+    role_id: roleId,
+    address,
+    notes,
+    profile_picture_id: profilePictureId,
+  };
+
+  const entries = Object.entries(fields).filter(([, value]) => value !== undefined);
+
+  if (!password && entries.length === 0) {
+    return res.status(400).json({ message: "No fields provided to update." });
+  }
+
+  try {
+    if (email) {
+      const emailCheck = await query(
+        `SELECT id
+         FROM users
+         WHERE email = $1 AND id <> $2
+         LIMIT 1`,
+        [email, id]
+      );
+
+      if (emailCheck.rowCount > 0) {
+        return res.status(409).json({ message: "Email already exists." });
+      }
+    }
+
+    if (roleId !== undefined) {
+      const roleCheck = await query(
+        `SELECT id
+         FROM roles
+         WHERE id = $1
+         LIMIT 1`,
+        [roleId]
+      );
+
+      if (roleCheck.rowCount === 0) {
+        return res.status(400).json({ message: "Role not found." });
+      }
+    }
+
+    if (password) {
+      const hashedPassword = await bcrypt.hash(password, 10);
+      entries.push(["password", hashedPassword]);
+    }
+
+    const setClauses = entries.map(
+      ([key], index) => `${key} = $${index + 1}`
+    );
+    const values = entries.map(([, value]) => value);
+    const idParamIndex = values.length + 1;
+
+    const result = await query(
+      `UPDATE users
+       SET ${setClauses.join(", ")}
+       WHERE id = $${idParamIndex}
+       RETURNING id, name, email, role_id, profile_picture_id, address, notes`,
+      [...values, id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    const roleResult = await query(
+      `SELECT title
+       FROM roles
+       WHERE id = $1
+       LIMIT 1`,
+      [result.rows[0].role_id]
+    );
+
+    return res.json({
+      user: {
+        ...result.rows[0],
+        role_title: roleResult.rows[0]?.title ?? null,
+      },
+    });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to update user." });
+  }
+};
+
+const deleteUser = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const result = await query(
+      `DELETE FROM users
+       WHERE id = $1
+       RETURNING id`,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return res.status(404).json({ message: "User not found." });
+    }
+
+    return res.status(200).json({ message: "User deleted." });
+  } catch (error) {
+    return res.status(500).json({ message: "Failed to delete user." });
+  }
+};
+
+export {
+  loginUser,
+  getMe,
+  createTechnician,
+  listUsers,
+  getUserById,
+  createUser,
+  updateUser,
+  deleteUser,
+};

@@ -3,6 +3,7 @@ import { getHealth } from "../controllers/healthController.js"
 import userRoutes from "./user.router.js"
 import customerRoutes from "./customer.router.js"
 import supplierRoutes from "./supplier.router.js"
+import purchaseRoutes from "./purchase.router.js"
 
 const routes = express.Router();
 
@@ -10,5 +11,6 @@ routes.get('/health', getHealth);
 routes.use('/user', userRoutes);
 routes.use('/customers', customerRoutes);
 routes.use('/suppliers', supplierRoutes);
+routes.use('/purchases', purchaseRoutes);
 
 export default routes
